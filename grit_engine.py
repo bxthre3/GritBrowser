@@ -1,11 +1,12 @@
 import time
 import numpy as np
+import threading
 from PIL import Image
-from kivy.graphics import Fbo, ClearColor, ClearWindow, RenderContext, Rectangle, Color
+from kivy.graphics import Fbo, ClearColor, ClearWindow, Rectangle, Color
 from kivy.clock import Clock
 from kivy.uix.widget import Widget
 from kivy.uix.behaviors import FocusBehavior
-from kivy.properties import NumericProperty, ObjectProperty, StringProperty
+from kivy.properties import NumericProperty, StringProperty, BooleanProperty
 
 class GritEngine(Widget, FocusBehavior):
     velocity = NumericProperty(0)
@@ -13,6 +14,7 @@ class GritEngine(Widget, FocusBehavior):
     current_gear = NumericProperty(10)
     capture_interval = NumericProperty(0.2)
     url = StringProperty("https://www.google.com")
+    is_processing = BooleanProperty(False)
     
     def __init__(self, **kwargs):
         super(GritEngine, self).__init__(**kwargs)
@@ -29,52 +31,50 @@ class GritEngine(Widget, FocusBehavior):
     def init_fbo(self, dt):
         with self.canvas:
             self.fbo = Fbo(size=self.size)
-            # In a real Kivy browser, we'd use CefPython or WebView
-            # For this cross-platform implementation, we simulate the web content rendering
             with self.fbo:
-                ClearColor(0.1, 0.1, 0.1, 1)
+                ClearColor(0.05, 0.05, 0.05, 1)
                 ClearWindow()
                 Color(1, 1, 1, 1)
                 self.fbo_rect = Rectangle(size=self.size, pos=self.pos)
             
-    def capture_frame(self):
-        if not self.fbo:
-            return None
-        
-        # GPU-accelerated texture capture
-        self.fbo.draw()
-        return self.fbo.pixels
-
-    def calculate_delta(self, current_pixels):
-        if self.last_texture_data is None:
-            self.last_texture_data = current_pixels
-            return 0
-        
-        w, h = self.size if self.size[0] > 0 else (800, 600)
-        
-        try:
-            # 8x8 grayscale MSE for Delta
-            img = Image.frombytes('RGBA', (int(w), int(h)), current_pixels).convert('L').resize((8, 8))
-            last_img = Image.frombytes('RGBA', (int(w), int(h)), self.last_texture_data).convert('L').resize((8, 8))
-            
-            arr1 = np.array(img, dtype=np.float32)
-            arr2 = np.array(last_img, dtype=np.float32)
-            
-            mse = np.mean((arr1 - arr2) ** 2)
-            self.last_texture_data = current_pixels
-            return mse / 255.0
-        except Exception as e:
-            return 0
-
     def adaptive_loop(self, dt):
-        pixels = self.capture_frame()
-        if pixels:
-            self.image_delta = self.calculate_delta(pixels)
+        if self.is_processing or not self.fbo:
+            return
             
-        # Adaptive Gears: (Velocity × 0.4) + (Image Delta × 0.6)
-        score = (self.velocity * 0.4) + (self.image_delta * 0.6)
+        # GPU-accelerated texture capture (must be on main thread)
+        self.fbo.draw()
+        pixels = self.fbo.pixels
+        size = self.size
         
-        # Map score to Gear (G1-G10)
+        # Offload Delta calculation to background thread for 60FPS UI
+        self.is_processing = True
+        threading.Thread(target=self.process_frame, args=(pixels, size)).start()
+
+    def process_frame(self, pixels, size):
+        try:
+            w, h = size if size[0] > 0 else (800, 600)
+            img = Image.frombytes('RGBA', (int(w), int(h)), pixels).convert('L').resize((8, 8))
+            
+            if self.last_texture_data is not None:
+                last_img = Image.frombytes('RGBA', (int(w), int(h)), self.last_texture_data).convert('L').resize((8, 8))
+                arr1 = np.array(img, dtype=np.float32)
+                arr2 = np.array(last_img, dtype=np.float32)
+                mse = np.mean((arr1 - arr2) ** 2)
+                delta = mse / 255.0
+            else:
+                delta = 0
+                
+            self.last_texture_data = pixels
+            
+            # Update UI properties on main thread
+            Clock.schedule_once(lambda dt: self.update_engine_state(delta))
+        except Exception as e:
+            print(f"Engine Error: {e}")
+            Clock.schedule_once(lambda dt: setattr(self, 'is_processing', False))
+
+    def update_engine_state(self, delta):
+        self.image_delta = delta
+        score = (self.velocity * 0.4) + (self.image_delta * 0.6)
         new_gear = int(max(1, min(10, score * 100)))
         self.current_gear = new_gear
         
@@ -84,6 +84,8 @@ class GritEngine(Widget, FocusBehavior):
             Clock.unschedule(self.adaptive_loop)
             Clock.schedule_interval(self.adaptive_loop, self.capture_interval)
             
+        self.is_processing = False
+
     def on_touch_down(self, touch):
         if self.collide_point(*touch.pos):
             self.update_velocity(0.2)
@@ -96,6 +98,4 @@ class GritEngine(Widget, FocusBehavior):
 
     def navigate(self, url):
         self.url = url
-        print(f"Navigating to: {url}")
-        # Update FBO content simulation
         self.update_velocity(0.5)
