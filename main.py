@@ -8,14 +8,18 @@ from kivymd.uix.textfield import MDTextField
 from kivymd.uix.button import MDIconButton
 
 from grit_engine import GritEngine
-from ui_components import GritBar, AMCCDashboard, GritChallengeModal
+from ui_components import GritBar, AMCCDashboard, GritChallengeModal, CoolDownOverlay
 from adhd_scaffolding import TaskPagingOverlay, FactCatcherSidebar
 from intelligence import IntelligenceLogic
+from utils import PersistenceManager
 
 class GritBrowserApp(MDApp):
     def build(self):
         self.theme_cls.theme_style = "Dark"
         self.theme_cls.primary_palette = "BlueGray"
+        self.persistence = PersistenceManager()
+        self.click_count = 0
+        self.last_click_time = 0
         
         # Main Layout
         root = FloatLayout()
@@ -70,16 +74,51 @@ class GritBrowserApp(MDApp):
         root.add_widget(self.intel)
         
         # 5. aMCC Dashboard (Bottom Left)
+        last_url, last_notes, last_xp, last_streak = self.persistence.load_session()
         self.dashboard = AMCCDashboard(size_hint=(0.2, 0.2), pos_hint={'x': 0, 'y': 0})
+        self.dashboard.xp = last_xp
+        self.dashboard.streak = last_streak
         root.add_widget(self.dashboard)
+        
+        # Cliff-Hanging: Restore session
+        if last_url:
+            self.url_input.text = last_url
+            self.engine.navigate(last_url)
         
         # Setup Exit Override
         Window.bind(on_request_close=self.on_request_close)
+        Window.bind(on_touch_down=self.on_global_touch)
         
         # Start Grit Bar Pulse
         Clock.schedule_interval(self.update_grit_pulse, 1)
+        Clock.schedule_interval(self.check_rage_control, 2)
         
         return root
+
+    def on_global_touch(self, window, touch):
+        current_time = Clock.get_time()
+        if current_time - self.last_click_time < 2:
+            self.click_count += 1
+        else:
+            self.click_count = 1
+        self.last_click_time = current_time
+        
+    def check_rage_control(self, dt):
+        if self.click_count > 10:
+            # Auto-trigger "Cool Down"
+            overlay = CoolDownOverlay()
+            self.root.add_widget(overlay)
+            Clock.schedule_once(lambda dt: self.root.remove_widget(overlay), 5)
+            self.click_count = 0
+
+    def on_stop(self):
+        # Save session on exit
+        self.persistence.save_session(
+            self.url_input.text, 
+            "", # Notes would be from a notes widget
+            self.dashboard.xp, 
+            self.dashboard.streak
+        )
 
     def on_url_submit(self, *args):
         url = self.url_input.text
